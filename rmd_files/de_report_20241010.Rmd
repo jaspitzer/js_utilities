@@ -1,0 +1,335 @@
+---
+title: "DE Report"
+output: 
+  html_document:
+    df_print: paged
+params:
+  COMPARISON: a_vs_b
+  RES: results
+  PRESENT_GENES: long_df
+  SPEC: "Mus musculus"
+  EXP: 1
+---
+
+```{css, echo=FALSE}
+body .main-container {
+max-width: 1280px !important;
+width: 1280px !important;
+}
+body {
+max-width: 1280px !important;
+}
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+here::i_am("rmd_files/de_report.Rmd")
+library(here)
+library(tidyverse)
+library(tidySummarizedExperiment)
+```
+
+
+```{r include=FALSE}
+#### functions for results
+
+
+get.groups <- function(COMP){
+  group <- str_split(COMP, "_vs_") %>% unlist()
+  return(group)
+}
+
+merge.names <- function(obj){
+  res <- obj %>% 
+    as.data.frame() %>% 
+    { if(str_length(rownames(obj)[1]) > 1)
+      
+      rownames_to_column(., "gene_id") else
+        .
+    } %>% 
+    left_join(rowData(dds) %>% as.data.frame() %>% dplyr::select(gene_id, symbol, entrezid)) %>%  
+    dplyr::select(gene_id, symbol, entrezid, everything())
+  return(res)
+}
+
+get.de <- function(OBJ){
+  de <- OBJ %>% 
+    merge.names() %>% 
+    filter(padj < 0.05, abs(log2FoldChange) > log2(1.5)) 
+  return(de)
+}
+
+
+de.table <- function(DE){
+  # 
+  # print(means)
+  df <- DE  %>% 
+    dplyr::left_join(y = means) %>% 
+    dplyr::select(-lfcSE) %>% 
+    mutate(across(c(baseMean, log2FoldChange, contains("_"), -gene_id), \(x) round(x,2)))
+  
+  write_tsv(df, here("results", COMPARISON, "de_gene_table.txt"))
+  return(df)
+} 
+
+
+plot.bars <- function(DE){
+  p <- DE %>% 
+    mutate(direction = ifelse(sign(log2FoldChange) == 1, "up", "down")) %>% 
+    ggplot(aes(direction, fill = direction))+
+    stat_count(geom = "bar", color = "black")+
+    geom_label(aes(label = after_stat(count)), 
+               stat ="count", show.legend = F)+
+    labs(title = "Number of DE genes", subtitle = "FC cutoff: 1.5, padj < 0.05", y = "Number of DE Genes")
+  
+  
+  ggsave(plot = p, 
+           here("results", COMPARISON, "plots", "de_genes.pdf"), 
+           width = 14, height = 8)
+    ggsave(plot = p, 
+           here("results", COMPARISON, "plots", "de_genes.png"), 
+           width = 14, height = 8, bg = "white")
+  return(p)
+}
+
+
+
+enrich.gos <- function(DE){
+  go_up <- DE %>% 
+    filter(log2FoldChange>0) %>% pull(gene_id) %>% 
+    clusterProfiler::enrichGO("org.Mm.eg.db", keyType = "ENSEMBL", readable = T, universe = means$gene_id, ont = "BP")
+  
+  go_dn <- DE %>% 
+    filter(log2FoldChange<0) %>% pull(gene_id) %>% 
+    clusterProfiler::enrichGO("org.Mm.eg.db", keyType = "ENSEMBL", readable = T, universe = means$gene_id, ont = "BP")
+  
+  ret_list <- list(go_up, go_dn) %>% 
+    set_names(c(paste("GO Terms enriched in", GROUP[1]),
+                paste("GO Terms enriched in", GROUP[2])))
+  
+  go_up %>% as.data.frame() %>% 
+    # dplyr::select(-qvalue) %>% 
+    mutate(fold_enrichment = DOSE::parse_ratio(GeneRatio)/DOSE::parse_ratio(BgRatio),
+           ES = -log(p.adjust)) %>% 
+    write_tsv(here("results", COMPARISON, "enrichments", paste0(GROUP[1], "_go_enrichments.txt")))
+  
+  go_dn %>% as.data.frame() %>% 
+    # dplyr::select(-qvalue) %>% 
+    mutate(fold_enrichment = DOSE::parse_ratio(GeneRatio)/DOSE::parse_ratio(BgRatio),
+           ES = -log(p.adjust)) %>% 
+    write_tsv(here("results", COMPARISON, "enrichments", paste0(GROUP[2], "_go_enrichments.txt")))
+  
+  return(ret_list)
+}
+
+get.ranked <- function(PRESENT = present_genes_long){
+  ranked <- PRESENT %>% 
+    mutate(group = paste(diet, genotype, treatment, sep = "_")) %>% 
+    dplyr::filter(group %in% GROUP) %>% 
+    group_by(group, symbol) %>% 
+    summarise(sd = sd(expression, na.rm = T), mean_expr = mean(expression, na.rm = T)) %>% 
+    mutate(sd = ifelse(sd >= 0.2 * abs(mean_expr), sd,  0.2 * abs(mean_expr)),
+           mean_expr = ifelse(mean_expr == 0, 1, mean_expr)) %>% 
+    mutate(group = ifelse(group == GROUP[2], "group2", "group1")) %>% 
+    pivot_wider(names_from = group, values_from = mean_expr:sd) %>% 
+    dplyr::filter(if_all(sd_group1:sd_group2,\(x) x > 0),
+                  if_any(mean_expr_group1:mean_expr_group2,\(x) x > 0)) %>%
+    mutate(ranking = (mean_expr_group1 - mean_expr_group2) / (sd_group1 + sd_group2),
+           symbol = fct_reorder(symbol, ranking, .desc = T)) %>% 
+    filter(!is.na(ranking))%>% 
+    arrange(desc(ranking)) %>% 
+    pull(ranking, name = symbol)
+  return(ranked)
+}
+
+enrich.gsea <- function(RANK, TYPE = "hallmarks", SPECIES = "Mus musculus"){
+  if(is.character(TYPE) && TYPE == "hallmarks"){
+    terms <- msigdbr::msigdbr(species = SPECIES, category = "H") %>% 
+      dplyr::select(gs_name, gene_symbol)
+  }else if(is.character(TYPE) && TYPE == "reactome"){
+    terms <- msigdbr::msigdbr(species = SPECIES, category = "C2", 
+                              subcategory = "CP:REACTOME") %>% 
+      dplyr::select(gs_name, gene_symbol)
+  }else{
+    terms = TYPE
+  }
+  enrich <- clusterProfiler::GSEA(RANK, TERM2GENE = terms)
+  
+  
+  enrich %>% as.data.frame() %>% 
+    # dplyr::select(-qvalue) %>% 
+    write_tsv(here("results", COMPARISON, "enrichments", paste0(COMPARISON,"_", TYPE, "_enrichments.txt")))
+  
+  return(enrich)
+}
+
+
+plot.go <- function(OBJ, TIT = "", N = 10, SEL = ES, PLOT = fold_enrichment){
+  if(dim(OBJ)[1] > 0){
+    p <- OBJ %>% as.data.frame() %>% 
+      mutate(fold_enrichment = DOSE::parse_ratio(GeneRatio)/DOSE::parse_ratio(BgRatio),
+             ES = -log(p.adjust)) %>% 
+      slice_max(tibble(ES, fold_enrichment), n = N) %>% 
+      mutate(Description = fct_reorder(Description, {{PLOT}})) %>% 
+      ggplot(aes({{PLOT}}, Description))+
+      geom_col(fill = "#E69F00")+
+      scale_x_continuous(position = "top")+
+      scale_y_discrete(labels = \(x) str_wrap(x, width = 40))+
+      labs(y = "", x = "Fold Enrichment", title = TIT)+
+      theme(axis.title.y = element_blank())
+    
+    ggsave(plot = p, 
+           here("results", COMPARISON, "plots", paste0("go_enrichment_", str_remove_all(TIT, ".+in "), ".pdf")), 
+           width = 14, height = 8)
+    ggsave(plot = p, 
+           here("results", COMPARISON, "plots", paste0("go_enrichment_", str_remove_all(TIT, ".+in "), ".png")), 
+           width = 14, height = 8, bg = "white")
+    return(p)
+  }else{
+    message("No GO Terms were found enriched")
+    return(ggplot()+labs(title = TIT))
+  }
+}
+
+plot.hallmarks <- function(OBJ, TIT = "", N = 10){
+  if(dim(OBJ)[1] > 0){
+    p <- OBJ %>% 
+      as.data.frame() %>% 
+      mutate(dir = sign(NES)) %>% 
+      slice_max(abs(NES), n = N, by = dir) %>% 
+      mutate(Description = str_remove_all(Description, "HALLMARK_") %>% str_remove_all("REACTOME_") %>%  str_replace_all("_", " ") %>% 
+               str_wrap(width = 60) %>% fct_reorder(NES),
+             direction = ifelse(NES > 0, "up", "down")) %>% 
+      ggplot(aes(x = NES, y = Description, fill = direction))+
+      geom_col()+
+      theme(legend.position = "none")+
+      labs(y = "", title = TIT)
+    
+    
+    ggsave(plot = p, 
+           here("results", COMPARISON, "plots", paste0(str_remove_all(TIT, " .+"), "_enrichment", ".pdf")), 
+           width = 14, height = 8)
+    ggsave(plot = p, 
+           here("results", COMPARISON, "plots", paste0(str_remove_all(TIT, " .+"), "_enrichment", ".png")), 
+           width = 14, height = 8, bg = "white")
+    return(p)
+  }else{
+    message("No hallmarks Terms were found enriched")
+    return(ggplot()+
+             labs(y = "", title = TIT))
+  }
+}
+
+plot.volcano <- function(RES, FC_CO = log2(1.5), PVAL_CO = 0.05, TITLE = "", FC = log2FoldChange, PV = padj, INT = F){
+  res_update <- RES %>% 
+    merge.names() %>% 
+    dplyr::mutate(fc =  {{FC}},
+                  pv = {{PV}},
+                  fc = round(fc, 2),
+                  signif = case_when(
+                    is.na(fc) | is.na(pv) ~ "no",
+                    abs(fc) > FC_CO & pv < PVAL_CO ~ "both",
+                    abs(fc) > FC_CO ~ "fold change",
+                    pv < PVAL_CO ~ "p-value",
+                    T ~ "no"),
+                  signif = fct_relevel(signif, "no", "fold change", "p-value")) %>% 
+  dplyr::filter(!is.na(pv))
+  
+  
+  
+  p <- res_update %>% 
+    ggplot(aes(fc, -log10(pvalue), color = signif, alpha = signif, text = paste("log2 FC:", fc, "\nGene:", symbol)))+
+    geom_point()+
+    annotate("text", y = 0, 
+             x = c(max(res_update %>% filter(!is.na(padj)) %>% pull(fc), na.rm = T), min(res_update %>% filter(!is.na(padj)) %>% pull(fc), na.rm = T)), 
+             label = c(paste("higher in\n", GROUP[1]), paste("higher in\n", GROUP[2])),
+             alpha = 0.8)+
+    theme_minimal()+
+    scale_alpha_manual(values = c(0.1, 0.4, 0.4, 1))+
+    scale_color_manual(values = c("darkgrey", "orange", "darkblue", "red"))+
+    labs(title = TITLE, x = "log2 FC", y = "-log10 p-value", color = "Significant by:", alpha = "Significant by:")
+  
+  ggsave(plot = p, 
+         here("results", COMPARISON, "plots", paste0("volcano_plot_", COMPARISON, ".pdf")), 
+         width = 14, height = 8)
+  ggsave(plot = p, 
+         here("results", COMPARISON, "plots", paste0("volcano_plot_", COMPARISON, ".png")), 
+         width = 14, height = 8, bg = "white")
+  
+  if(INT){
+    library(plotly)
+    p <- ggplotly(p, tooltip = c("y", "size", "text"), width = 1600, height = 900) %>%
+      layout(
+        margin = list(l = 30, r = 8, b = 100, t = 50),
+        annotations = list(
+          x = 1, y = -0.2,
+          text = paste(dim(res_update)[1], "genes present"),
+          xref = 'paper', yref = 'paper', showarrow = F,
+          xanchor = 'right', yanchor = 'auto', xshift = 0, yshift = 0,
+          font = list(size = 10)
+        )
+      )
+  }
+  return(p)
+}
+
+get.mean.expressions <- function(PRESENT){
+  mean_expressions <- PRESENT %>% 
+    mutate(group = paste(diet, genotype, treatment, sep = "_")) %>% 
+    # filter(diet %in% c("CD", "HFD"), treatment == "untreated", genotype == "wt") %>% 
+    group_by(group, gene_id, symbol) %>%
+    summarize(mean_expr = mean(expression)) %>% 
+    ungroup() %>%
+    pivot_wider(names_from = -c(mean_expr, gene_id, symbol), values_from = mean_expr) %>% 
+    filter(if_all(where(is.numeric),\(x) x > 10 ),
+           gene_id %in% de$gene_id)
+  
+  return(mean_expressions)
+}
+```
+
+
+
+```{r setup, include=FALSE}
+COMPARISON <- params$COMPARISON
+RES <- params$RES
+PRESENT_GENES <- params$PRESENT_GENES
+EXP <- params$EXP
+SPEC <- params$SPEC
+```
+
+
+
+```{r de table, echo=FALSE, message=FALSE, warning=FALSE}
+GROUP <- get.groups(COMPARISON)
+
+means <- get.mean.expressions(PRESENT_GENES)
+
+de <- get.de(RES)
+
+dir.create(here("results", COMPARISON), showWarnings = F)
+dir.create(here("results", COMPARISON, "plots"), showWarnings = F)
+dir.create(here("results", COMPARISON, "enrichments"), showWarnings = F)
+(de_table <- de.table(de))
+```
+
+
+```{r enrichment, echo=FALSE, message=FALSE, warning=FALSE}
+gos <- enrich.gos(de)
+ranking <- get.ranked(PRESENT_GENES)
+hallmarks <- enrich.gsea(ranking, "hallmarks", SPECIES = SPEC)
+reactome <- enrich.gsea(ranking, "reactome", SPECIES = SPEC)
+```
+
+```{r plotting, echo=FALSE, message=FALSE, warning=FALSE, fig.width=16, fig.height=9}
+(plot.bars(de))
+
+
+(volcano_plot <- plot.volcano(RES = RES, TITLE = paste("DE genes for", GROUP[1], "vs", GROUP[2])))
+(volcano_plot_int <- plot.volcano(RES = RES, TITLE = paste("DE genes for", GROUP[1], "vs", GROUP[2]), INT = T))
+(go_plots <- imap(gos, plot.go))
+(hallmark_plot <- plot.hallmarks(hallmarks, paste("Hallmark enrichment for", GROUP[1], "vs", GROUP[2])))
+(reactome_plot <- plot.hallmarks(reactome, paste("Reactome enrichment for", GROUP[1], "vs", GROUP[2])))
+```
+

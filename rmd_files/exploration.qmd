@@ -1,0 +1,32 @@
+---
+title: "Untitled"
+author: "JS"
+format: html
+editor: visual
+---
+
+## Libraries
+
+```{r}
+here::i_am("rmd_files/exploration.qmd")
+library(tidyverse)
+library(here)
+```
+
+## default theme
+
+```{r}
+theme_set(theme_classic(base_size = 14))
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = thematic::okabe_ito())
+} 
+scale_color_discrete <- function(...) {
+   scale_fill_manual(..., values = thematic::okabe_ito())
+} 
+```
+
+## sourcing the function script
+
+```{r}
+source(here("scripts", "functions.R"))
+```
