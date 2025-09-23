@@ -117,8 +117,19 @@ plot.volcano <- function(RES, FC_CO = log2(1.5), PVAL_CO = 0.05, TITLE = "", FC 
 
 
 
-plot.lots.of.categories <- function(){
-  ggplot(dat, aes(x = cat, y = num))+
-    geom_boxplot()+
-    scale_x_discrete(guide = guide_axis(n.dodge = 2))
+scale_x_dodge <- function(X, ...){
+  ggplot2::scale_x_discrete(guide = ggplot2::guide_axis(n.dodge = X), ...)
+}
+scale_y_dodge <- function(X, ...){
+  ggplot2::scale_y_discrete(guide = ggplot2::guide_axis(n.dodge = X), ...)
+}
+
+
+save.plot.multiple <- function(NAMES, PLOT, HEIGHT = 8, WIDTH = 14, full_paths = F){
+  
+  if(!full_path){
+    NAMES <- here::here("results", "plots", paste0(NAMES, c(".png", ".svg", ".pdf")))
+  }
+  purrr::map(NAMES, \(x) ggplot2::ggsave(x, PLOT, height = HEIGHT, width = WIDTH, bg = "white"))
+  print(PLOT)
 }
