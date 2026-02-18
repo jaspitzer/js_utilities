@@ -41,6 +41,8 @@ get.gos <- function(NAME, obj = dds, species = "hs"){
   metadata(obj)$fe_results[[NAME]][["dn_go"]] <- dn_go
   return(obj)
 }
+## EXAMPLE
+# dds_2 <- get.gos("KO effect in untreated")
 
 
 
@@ -95,3 +97,8 @@ get.gsea <- function(NAME, obj = dds, type = "HALLMARK", conditions, species = "
   
   return(obj)
 }
+
+## Example
+# 
+# dds_3 <- get.gsea(NAME = "KO effect in untreated", obj = dds_2, type = "HALLMARK", conditions = c("ko_untreated", "wt_untreated"))
+# dds_3 <- get.gsea(NAME = "KO effect in untreated", obj = dds_3, type = "REACTOME", conditions = c("ko_untreated", "wt_untreated"))
