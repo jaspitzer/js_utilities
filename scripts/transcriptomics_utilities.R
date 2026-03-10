@@ -125,7 +125,7 @@ scale_y_dodge <- function(X, ...){
 }
 
 
-save.plot.multiple <- function(NAMES, PLOT, HEIGHT = 8, WIDTH = 14, full_paths = F){
+save.plot.multiple <- function(NAMES, PLOT, HEIGHT = 8, WIDTH = 14, full_path = F){
   
   if(!full_path){
     NAMES <- here::here("results", "plots", paste0(NAMES, c(".png", ".svg", ".pdf")))
